@@ -31,9 +31,11 @@ def get_sponsors_parsed(pdf_url):
 class SponsorsData:
     """Converts provided XML file with sponsor list to DF and saves it as csv file"""
 
-    tier_subtypes = {'Creative & Sporting', 'Tier 2 General', 'Seasonal Worker',
-                     'Intra Company Transfers (ICT)', 'Religious Workers', 'Voluntary Workers',
-                     'Exchange', 'Sport', 'International Agreements'}
+    # form a list of tier type-subtype tuple for each subtype
+    tier_type_subtypes = pd.read_csv('tier_types.csv').iloc[:, :2]
+    tier_type_subtypes = [tuple(x) for x in tier_type_subtypes.values]
+    # create a set of different tier subtypes
+    tier_subtypes = set([x[1] for x in tier_type_subtypes if str(x[1]) != 'nan'])
     counties = set(pd.read_csv('uk-counties-list.csv', header=None)[1])
 
     def __init__(self, file_path:str, date:str=None, encoding='utf-8', write_df=True):
@@ -52,6 +54,9 @@ class SponsorsData:
         self.correct_df()
         if write_df:
             self._write_df_to_csv()
+        # errors in data probable
+        self.prob_error = False
+        self.check_df()
 
     @staticmethod
     def _parse_date(fname):
@@ -64,14 +69,27 @@ class SponsorsData:
         if self.sponsors_df.loc[pd.isnull(self.sponsors_df['tier_type'])].size > 0:
             self.fix_missed_tier_type()
 
+    def check_df(self):
+        # 1. check there are no unknown visa types
+        if len(self.sponsors_df[~self.sponsors_df['tier_subtype'].isin(self.tier_subtypes)]) > 0:
+            self.prob_error = True
+            print(f'WARNING: '
+                  f'{self.sponsors_df.tier_subtype[~self.sponsors_df.tier_subtype.isin(self.tier_subtypes)].values}'
+                  f' are not in the tier subtypes list')
+
     def fix_missed_tier_type(self):
         def correct_tier_type(x):
-            potential_type = x['tier_subtype'][:6]
-            if potential_type == 'Tier 2' or potential_type == 'Tier 5':
-                x['tier_type'] = potential_type
+            if x['tier_subtype'] == '':
+                print(f'No tier type/subtype defined')
                 return x
+            tier_type = [i[0] for i in self.tier_type_subtypes if i[1] == x['tier_subtype']]
+            if tier_type:
+                x['tier_type'] = tier_type[0]
+                # print(f'tier visa subtype was corrected for :\n{x}')
             else:
-                raise ValueError(f"Tier visa type is not defined: {x}")
+                print(f"Unknown tier visa subtype: {x}")
+                self.prob_error = True
+            return x
 
         self.sponsors_df.loc[pd.isnull(self.sponsors_df['tier_type'])] = \
             self.sponsors_df.loc[pd.isnull(self.sponsors_df['tier_type'])].\
@@ -169,7 +187,9 @@ def main():
         print(f'Data for date {file_date} already loaded.')
     else:
         sd = SponsorsData(file_path, date=file_date)
-        insert_to_db(sd.csv_data_file)
+        if not sd.prob_error:
+            # TODO also check new sponsor list does not differ much (<20%?) from the previous one.
+            insert_to_db(sd.csv_data_file)
 
 
 if __name__ == "__main__":

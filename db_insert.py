@@ -11,7 +11,7 @@ def freshest_data():
     return files[-1]
 
 
-def insert_to_db(csv_file_path):
+def insert_to_db(sponsors_file):
     conn_params = f"postgresql://{params['user']}:{params['password']}@{params['host']}/{params['database']}"
     engine = create_engine(conn_params)
 
@@ -20,8 +20,6 @@ def insert_to_db(csv_file_path):
     df_tier_types.index.name = 'tier_type_id'
     df_tier_types.to_sql(name='tier_types', con=engine, if_exists='replace', method='multi')
 
-    # find last recorded file of sponsors
-    sponsors_file = freshest_data()
     df_sponsors = pd.read_csv(sponsors_file)
 
     # insert sponsors into db
@@ -36,6 +34,8 @@ def insert_to_db(csv_file_path):
     df_sponsors_visas = pd.merge(df_sponsors_with_id, df_tier_types, on=['tier_type', 'tier_subtype'])
     df_sponsors_visas[['sponsor_id', 'tier_type_id', 'tier_rating']].\
         to_sql(name='sponsors_visas', con=engine, if_exists='replace', method='multi')
+
+    print(f'Successfully inserted from {sponsors_file}')
 
 if __name__ == '__main__':
     if len(sys.argv) == 2:
