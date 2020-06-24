@@ -37,6 +37,9 @@ def insert_to_db(sponsors_file):
 
     print(f'Successfully inserted from {sponsors_file}')
 
+    with engine.connect() as con:
+        con.execute('GRANT SELECT ON ALL TABLES IN SCHEMA public TO guest;')
+
 if __name__ == '__main__':
     if len(sys.argv) == 2:
         insert_to_db(sys.argv[1])
