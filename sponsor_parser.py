@@ -1,9 +1,12 @@
 from bs4 import BeautifulSoup
+from glob import glob
 import pandas as pd
 import os
 import re
 import requests
-from db_insert import insert_to_db
+from sqlalchemy import create_engine
+import sys
+from connection_settings import params
 
 
 def find_sponsors_url(source_url):
@@ -16,6 +19,7 @@ def find_sponsors_url(source_url):
 
 def get_sponsors_parsed(pdf_url):
     doc_date = re.search('\/20(\d{2}-\d{2}-\d{2})', pdf_url).groups()[0].replace('-', '')
+    # TODO create 'sponsors' dir if not exists
     base_dir = 'sponsors'
     file_name_prefix = 'tier-2-5_sponsors'
     with open(f'./{base_dir}/{file_name_prefix}_{doc_date}.pdf', 'wb') as f:
@@ -28,6 +32,13 @@ def get_sponsors_parsed(pdf_url):
     return f'./{base_dir}/{file_name_prefix}_{doc_date}.xml', doc_date
 
 
+def freshest_data():
+    # find all sponsors file and return the path to the freshest one
+    files = glob('./sponsors/tier*.csv')
+    files = sorted(files)
+    return files[-1]
+
+
 class SponsorsData:
     """Converts provided XML file with sponsor list to DF and saves it as csv file"""
 
@@ -38,7 +49,12 @@ class SponsorsData:
     tier_subtypes = set([x[1] for x in tier_type_subtypes if str(x[1]) != 'nan'])
     counties = set(pd.read_csv('uk-counties-list.csv', header=None)[1])
 
-    def __init__(self, file_path:str, date:str=None, encoding='utf-8', write_df=True):
+    def __init__(self, file_path:str, date:str=None, encoding='utf-8', to_csv=True,
+                 to_db=True, check_errors=True, to_db_if_error=False, db_settings=None):
+        if db_settings is None:
+            to_db = False
+        else:
+            self.db_params = db_settings
         self.file_encoding = encoding
         self.date = date or self._parse_date(file_path)
         if file_path.endswith('.xml'):
@@ -52,11 +68,14 @@ class SponsorsData:
             raise ValueError(f'Incorrect file format: {file_path}. '
                              f'xml or csv file is expected')
         self.correct_df()
-        if write_df:
+        if to_csv:
             self._write_df_to_csv()
         # errors in data probable
         self.prob_error = False
-        self.check_df()
+        if check_errors:
+            self.check_df()
+        if to_db and ((not self.prob_error) or to_db_if_error):
+            self.insert_into_db()
 
     @staticmethod
     def _parse_date(fname):
@@ -64,6 +83,34 @@ class SponsorsData:
 
     def _write_df_to_csv(self):
         self.sponsors_df.to_csv(self.csv_data_file, encoding='utf-8', index=False)
+
+    def insert_into_db(self):
+        conn_params = f"postgresql://{self.db_params['user']}:{self.db_params['password']}" \
+                      f"@{self.db_params['host']}/{self.db_params['database']}"
+        engine = create_engine(conn_params)
+
+        # insert tier types into db
+        df_tier_types = pd.read_csv('tier_types.csv')
+        df_tier_types.index.name = 'tier_type_id'
+        df_tier_types.to_sql(name='tier_types', con=engine, if_exists='replace', method='multi')
+
+        # insert sponsors into db
+        df_sponsors_unique = self.sponsors_df[['name', 'city', 'county']].drop_duplicates().reset_index(drop=True)
+        df_sponsors_unique.index.name = 'sponsor_id'
+        df_sponsors_unique.to_sql(name='sponsors', con=engine, if_exists='replace', method='multi')
+
+        # fill sponsor-visa_type table (many to many relation)
+        df_sponsors_unique['sponsor_id'] = df_sponsors_unique.index
+        df_sponsors_with_id = pd.merge(self.sponsors_df, df_sponsors_unique, on=['name', 'city', 'county'])
+        df_tier_types['tier_type_id'] = df_tier_types.index
+        df_sponsors_visas = pd.merge(df_sponsors_with_id, df_tier_types, on=['tier_type', 'tier_subtype'])
+        df_sponsors_visas[['sponsor_id', 'tier_type_id', 'tier_rating']]. \
+            to_sql(name='sponsors_visas', con=engine, if_exists='replace', method='multi')
+
+        print(f'Successfully inserted into DB')
+
+        with engine.connect() as con:
+            con.execute('GRANT SELECT ON ALL TABLES IN SCHEMA public TO guest;')
 
     def correct_df(self):
         if self.sponsors_df.loc[pd.isnull(self.sponsors_df['tier_type'])].size > 0:
@@ -76,6 +123,24 @@ class SponsorsData:
             print(f'WARNING: '
                   f'{self.sponsors_df.tier_subtype[~self.sponsors_df.tier_subtype.isin(self.tier_subtypes)].values}'
                   f' are not in the tier subtypes list')
+
+        # 2. check new sponsor list does not differ much (<20%?) from the previous one.
+        def prev_data():
+            # find all sponsors file and return the path to the last one
+            files = glob('sponsors/tier*.csv')
+            files = sorted(files)
+            if self.csv_data_file in files:
+                files.remove(self.csv_data_file)
+            if files:
+                return files[-1]
+        last_data = prev_data()
+        if not last_data:
+            return
+        last_sponsors = SponsorsData(last_data, encoding=self.file_encoding,
+                                     to_csv=False, to_db=False, check_errors=False)
+        if len(self.diff(last_sponsors).index) >= 0.4 * len(self.sponsors_df.index):
+            print(f'New sponsor list differs too much (>20%) from the previous one')
+            self.prob_error = True
 
     def fix_missed_tier_type(self):
         def correct_tier_type(x):
@@ -95,14 +160,16 @@ class SponsorsData:
             self.sponsors_df.loc[pd.isnull(self.sponsors_df['tier_type'])].\
             apply(correct_tier_type, axis=1)
 
-    def diff(self, other):
+    def diff(self, other, to_write=True):
         if not isinstance(other, SponsorsData):
             raise TypeError(f'SponsorsData object is expected for comparison. {type(other)} got.')
         merged = self.sponsors_df.merge(other.sponsors_df, indicator=True, how='outer')
         path = f"{self.csv_data_file[0:self.csv_data_file.rfind('/')]}/" \
                f"diff_{self.date}_{other.date}.csv"
-        merged[merged['_merge'] != 'both'].sort_values('name').\
-            to_csv(path, index=False)
+        if to_write:
+            merged[merged['_merge'] != 'both'].sort_values('name').\
+                to_csv(path, index=False)
+        return merged[merged['_merge'] != 'both']
         # print(merged[merged['_merge'] == 'right_only'])
         # print(merged[merged['_merge'] == 'left_only'])
 
@@ -179,18 +246,19 @@ class SponsorsData:
         return sponsors
 
 
-def main():
+def download():
     gov_url = r'https://www.gov.uk/government/publications/register-of-licensed-sponsors-workers'
     sponsors_url = find_sponsors_url(gov_url)
     file_path, file_date = get_sponsors_parsed(sponsors_url)
-    if os.path.isfile(file_path.replace('.xml', '.csv')):
-        print(f'Data for date {file_date} already loaded.')
-    else:
-        sd = SponsorsData(file_path, date=file_date)
-        if not sd.prob_error:
-            # TODO also check new sponsor list does not differ much (<20%?) from the previous one.
-            insert_to_db(sd.csv_data_file)
+    # if os.path.isfile(file_path.replace('.xml', '.csv')):
+    #     print(f'Data for date {file_date} already loaded.')
+    return file_path, file_date
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 1:
+        file_path, file_date = download()
+    else:
+        file_path = sys.argv[1]
+        file_date = re.search('_(\d{6})\.', file_path).groups()[0]
+    sd = SponsorsData(file_path, date=file_date, to_db=True, check_errors=True, to_db_if_error=False, db_settings=params)
