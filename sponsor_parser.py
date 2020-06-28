@@ -265,4 +265,5 @@ if __name__ == "__main__":
     sd = SponsorsData(file_path)
     # if no new/suspicious data and it hasn't been changed too much from the previous one
     if sd.validate() and small_diff(sd):
-        sd.insert_into_db(params)
+        if params['dialect'] and params['host']:
+            sd.insert_into_db(params)
