@@ -1,7 +1,8 @@
 params = {
- 'host': 'sqlhub.net',
+ 'dialect': '',
+ 'host': '',
  'port': 5432,
- 'database': 'uk-tier-2-5-sponsors',
+ 'database': '',
  'user': '',
  'password': '',
 }

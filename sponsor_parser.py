@@ -20,11 +20,11 @@ class SponsorsData:
     """Converts provided XML file with sponsor list to DF and saves it as csv file"""
 
     # form a list of tier type-subtype tuple for each subtype
-    tier_type_subtypes = pd.read_csv('tier_types.csv').iloc[:, :2]
+    tier_type_subtypes = pd.read_csv('data/tier_types.csv').iloc[:, :2]
     tier_type_subtypes = [tuple(x) for x in tier_type_subtypes.values]
     # create a set of different tier subtypes
     tier_subtypes = set([x[1] for x in tier_type_subtypes if str(x[1]) != 'nan'])
-    counties = set(pd.read_csv('uk-counties-list.csv', header=None)[1])
+    counties = set(pd.read_csv('data/uk-counties-list.csv', header=None)[1])
 
     def __init__(self, file_path:str, date:str=None, encoding='utf-8'):
         self.file_encoding = encoding
@@ -51,12 +51,12 @@ class SponsorsData:
         print('Sponsors file is successfully saved to CSV')
 
     def insert_into_db(self, db_params=params):
-        conn_params = f"postgresql://{db_params['user']}:{db_params['password']}" \
+        conn_params = f"{db_params['dialect']}://{db_params['user']}:{db_params['password']}" \
                       f"@{db_params['host']}/{db_params['database']}"
         engine = create_engine(conn_params)
 
         # insert tier types into db
-        df_tier_types = pd.read_csv('tier_types.csv')
+        df_tier_types = pd.read_csv('data/tier_types.csv')
         df_tier_types.index.name = 'tier_type_id'
         df_tier_types.to_sql(name='tier_types', con=engine, if_exists='replace', method='multi')
 
